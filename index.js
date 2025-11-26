@@ -12,7 +12,7 @@ app.use((req, res, next) => {
 
 // --- CONSTANTS ---
 const TAX_RATE = 0.07; // 7%
-const SHIPPING_ESTIMATE_YEAR = 15.0; // 🔧 you can adjust later
+const SHIPPING_ESTIMATE_YEAR = 15.0; // 🔧 adjust later if needed
 
 function round2(n) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -154,14 +154,41 @@ const PRODUCTS = [
   },
 ];
 
+// Decide how many "variants" (different formulas) we need for hair/body items
+function getVariantMultiplier(productName, flags) {
+  const lower = productName.toLowerCase();
+  const isHairOrBody =
+    lower.includes("shampoo") ||
+    lower.includes("conditioner") ||
+    lower.includes("body wash");
+
+  if (!isHairOrBody) return 1;
+
+  let count = 0;
+  if (flags.hasWomen) count++;
+  if (flags.hasMen) count++;
+  if (flags.hasKids) count++;
+
+  // At least 1 if the product is included at all
+  return count > 0 ? count : 1;
+}
+
 // --- MAIN ENDPOINT ---
 app.get("/plan", (req, res) => {
   try {
     const quiz = req.query || {};
-    const householdSize = quiz.householdSize || "";
     const topConcerns = quiz.topConcerns || "";
     const wontUseRaw = quiz.wontUse || "";
     const wantToAdd = quiz.wantToAdd || "";
+
+    const females13 = parseInt(quiz.females_13_plus || "0", 10) || 0;
+    const males13 = parseInt(quiz.males_13_plus || "0", 10) || 0;
+    const kids012 = parseInt(quiz.kids_0_12 || "0", 10) || 0;
+    const householdSize = females13 + males13 + kids012;
+
+    const hasWomen = females13 > 0;
+    const hasMen = males13 > 0;
+    const hasKids = kids012 > 0;
 
     // normalize "won't use" list
     const wontUseList = wontUseRaw
@@ -186,10 +213,18 @@ app.get("/plan", (req, res) => {
       const price = p.price || 0;
       const refills = p.refillsPerYear || 0;
 
-      // assumption: 1 initial unit in month 1 + refills/year AFTER that
-      const initialQty = 1;
+      const variantMultiplier = getVariantMultiplier(p.name, {
+        hasWomen,
+        hasMen,
+        hasKids,
+      });
+
+      // Month 1: 1 unit per variant (e.g. women formula, men formula, kids formula)
+      const initialQty = variantMultiplier;
       const initialCost = round2(initialQty * price);
-      const refillsCost = round2(refills * price);
+
+      // Refills: refillsPerYear * each variant
+      const refillsCost = round2(refills * price * variantMultiplier);
       const totalYearCost = round2(initialCost + refillsCost);
 
       yearlySubtotal += totalYearCost;
@@ -206,7 +241,7 @@ app.get("/plan", (req, res) => {
       restYearProducts.push({
         name: p.name,
         unit_price: price,
-        refills_per_year: refills,
+        refills_per_year: refills * variantMultiplier,
         cost_rest_of_year: refillsCost,
         total_cost_year: totalYearCost,
       });
@@ -226,7 +261,7 @@ app.get("/plan", (req, res) => {
     const restYearSubtotal = round2(yearlySubtotal - firstMonthSubtotal);
     const restYearTax = round2(restYearSubtotal * TAX_RATE);
     const restYearTotal = round2(restYearSubtotal + restYearTax);
-    const avgMonthRest = round2(restYearTotal / 11); // months 2–12
+    const avgMonthRest = restYearTotal > 0 ? round2(restYearTotal / 11) : 0; // months 2–12
 
     const yearTotals = {
       products_subtotal: yearlySubtotal,
@@ -254,27 +289,56 @@ app.get("/plan", (req, res) => {
       },
     ];
 
-    let summary = `For your family, replacing ${includedProducts.length} items in this bath & body category for a full year is estimated at about $${yearGrandTotal.toFixed(
-      2
-    )} (products + 7% tax + estimated shipping).`;
+    // Build human summary
+    let parts = [];
+
+    if (householdSize > 0) {
+      let compPieces = [];
+      if (females13) compPieces.push(`${females13} female(s) 13+`);
+      if (males13) compPieces.push(`${males13} male(s) 13+`);
+      if (kids012) compPieces.push(`${kids012} kid(s) 0–12`);
+      const compText = compPieces.length ? compPieces.join(", ") : `${householdSize} people`;
+
+      parts.push(
+        `For your household (${compText}), we planned a full year of this bath & body category using separate formulas for women, men, and kids where needed (like shampoo, conditioner, and body wash).`
+      );
+    } else {
+      parts.push(
+        `We planned a full year of this bath & body category using separate formulas for different age groups where needed (like shampoo, conditioner, and body wash).`
+      );
+    }
+
+    parts.push(
+      `The estimated total for a year is about $${yearGrandTotal.toFixed(
+        2
+      )} (products + 7% tax + estimated shipping).`
+    );
 
     if (firstMonthTotal > 0) {
-      summary += ` Month 1 is about $${firstMonthTotal.toFixed(
-        2
-      )} as we replace everything once.`;
+      parts.push(
+        `Month 1 is about $${firstMonthTotal.toFixed(
+          2
+        )} as we replace everything once.`
+      );
     }
     if (avgMonthRest > 0) {
-      summary += ` Months 2–12 then average around $${avgMonthRest.toFixed(
-        2
-      )} per month as you move onto a refill schedule.`;
+      parts.push(
+        `Months 2–12 then average around $${avgMonthRest.toFixed(
+          2
+        )} per month as you move onto a refill schedule.`
+      );
     }
 
     if (topConcerns) {
-      summary += ` We kept your top concerns in mind: ${topConcerns}.`;
+      parts.push(`We kept your top concerns in mind: ${topConcerns}.`);
     }
     if (wantToAdd) {
-      summary += ` You also requested some items not on this list. We’ll review those manually and see what we can source for you: ${wantToAdd}.`;
+      parts.push(
+        `You also asked for items not on this list. We’ll review those manually and see what we can source for you: ${wantToAdd}.`
+      );
     }
+
+    const summary = parts.join(" ");
 
     const response = {
       summary,
@@ -289,6 +353,9 @@ app.get("/plan", (req, res) => {
       schedule,
       meta: {
         householdSize,
+        females_13_plus: females13,
+        males_13_plus: males13,
+        kids_0_12: kids012,
         wontUse: wontUseList,
         wantToAdd,
       },
