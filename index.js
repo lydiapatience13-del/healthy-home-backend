@@ -12,10 +12,23 @@ app.use((req, res, next) => {
 
 // --- CONSTANTS ---
 const TAX_RATE = 0.07; // 7%
-const SHIPPING_ESTIMATE_YEAR = 15.0; // 🔧 adjust later if needed
+const SHIPPING_PER_SHIPMENT = 8.0; // $8 per shipment per store
 
 function round2(n) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+// helper: extract store/domain from URL
+function getStoreKey(url) {
+  if (!url) return null;
+  // some URLs have " OR " – just use the first
+  const firstPart = url.split(" ")[0];
+  try {
+    const u = new URL(firstPart);
+    return u.hostname;
+  } catch (e) {
+    return null;
+  }
 }
 
 // --- MASTER PRODUCT LIST ---
@@ -202,16 +215,19 @@ app.get("/plan", (req, res) => {
       return !wontUseList.includes(p.name.toLowerCase());
     });
 
-    // calculate pricing
     let yearlySubtotal = 0;
     let firstMonthSubtotal = 0;
 
     const firstMonthProducts = [];
     const restYearProducts = [];
 
+    // For shipping: store -> max shipments/year among its products
+    const storeShipments = {};
+
     includedProducts.forEach((p) => {
       const price = p.price || 0;
-      const refills = p.refillsPerYear || 0;
+      const refillsPerYear = p.refillsPerYear || 0; // includes initial month
+      if (refillsPerYear <= 0) return; // nothing shipping
 
       const variantMultiplier = getVariantMultiplier(p.name, {
         hasWomen,
@@ -219,12 +235,17 @@ app.get("/plan", (req, res) => {
         hasKids,
       });
 
-      // Month 1: 1 unit per variant (e.g. women formula, men formula, kids formula)
+      // shipments/year already includes initial
+      const shipmentsPerYear = refillsPerYear;
+      const remainingShipments = Math.max(shipmentsPerYear - 1, 0);
+
+      // Month 1: one unit per variant
       const initialQty = variantMultiplier;
       const initialCost = round2(initialQty * price);
 
-      // Refills: refillsPerYear * each variant
-      const refillsCost = round2(refills * price * variantMultiplier);
+      // Remaining shipments: each shipment sends one unit per variant
+      const refillsCost = round2(remainingShipments * price * variantMultiplier);
+
       const totalYearCost = round2(initialCost + refillsCost);
 
       yearlySubtotal += totalYearCost;
@@ -241,32 +262,53 @@ app.get("/plan", (req, res) => {
       restYearProducts.push({
         name: p.name,
         unit_price: price,
-        refills_per_year: refills * variantMultiplier,
+        shipments_remaining: remainingShipments,
+        refills_per_year: remainingShipments * variantMultiplier, // units
         cost_rest_of_year: refillsCost,
         total_cost_year: totalYearCost,
       });
+
+      // shipping grouping by store
+      const storeKey = getStoreKey(p.url);
+      if (storeKey) {
+        const prev = storeShipments[storeKey] || 0;
+        // store shipping frequency = max shipments/year for that store
+        storeShipments[storeKey] = Math.max(prev, shipmentsPerYear);
+      }
     });
 
     yearlySubtotal = round2(yearlySubtotal);
     firstMonthSubtotal = round2(firstMonthSubtotal);
 
+    // Shipping: $8 per shipment per store
+    let shippingYearTotal = 0;
+    Object.keys(storeShipments).forEach((key) => {
+      shippingYearTotal += storeShipments[key] * SHIPPING_PER_SHIPMENT;
+    });
+    shippingYearTotal = round2(shippingYearTotal);
+
     const yearTax = round2(yearlySubtotal * TAX_RATE);
     const yearProductsPlusTax = round2(yearlySubtotal + yearTax);
-    const yearShipping = SHIPPING_ESTIMATE_YEAR;
-    const yearGrandTotal = round2(yearProductsPlusTax + yearShipping);
+    const yearGrandTotal = round2(yearProductsPlusTax + shippingYearTotal);
 
     const firstMonthTax = round2(firstMonthSubtotal * TAX_RATE);
     const firstMonthTotal = round2(firstMonthSubtotal + firstMonthTax);
 
+    // shipping for month 1 = one shipment per store that has any product
+    const storesCountMonth1 = Object.keys(storeShipments).length;
+    const firstMonthShipping = round2(storesCountMonth1 * SHIPPING_PER_SHIPMENT);
+    const restYearShipping = round2(shippingYearTotal - firstMonthShipping);
+
     const restYearSubtotal = round2(yearlySubtotal - firstMonthSubtotal);
     const restYearTax = round2(restYearSubtotal * TAX_RATE);
     const restYearTotal = round2(restYearSubtotal + restYearTax);
+
     const avgMonthRest = restYearTotal > 0 ? round2(restYearTotal / 11) : 0; // months 2–12
 
     const yearTotals = {
       products_subtotal: yearlySubtotal,
       tax_7_percent: yearTax,
-      shipping_estimate: yearShipping,
+      shipping_estimate: shippingYearTotal,
       grand_total: yearGrandTotal,
     };
 
@@ -275,6 +317,7 @@ app.get("/plan", (req, res) => {
       tax_7_percent: restYearTax,
       total_with_tax: restYearTotal,
       average_monthly_cost_months_2_to_12: avgMonthRest,
+      shipping_estimate: restYearShipping,
       products: restYearProducts,
     };
 
@@ -282,6 +325,7 @@ app.get("/plan", (req, res) => {
       {
         label: "Month 1 – Initial Replacement",
         estimated_total_with_tax: firstMonthTotal,
+        estimated_shipping: firstMonthShipping,
       },
       {
         label: "Average Months 2–12",
@@ -311,21 +355,25 @@ app.get("/plan", (req, res) => {
     parts.push(
       `The estimated total for a year is about $${yearGrandTotal.toFixed(
         2
-      )} (products + 7% tax + estimated shipping).`
+      )} (products + 7% tax + about $${shippingYearTotal.toFixed(
+        2
+      )} in shipping, assuming roughly $${SHIPPING_PER_SHIPMENT.toFixed(
+        2
+      )} per shipment per store based on your refill schedule).`
     );
 
     if (firstMonthTotal > 0) {
       parts.push(
-        `Month 1 is about $${firstMonthTotal.toFixed(
+        `Month 1 products are about $${firstMonthTotal.toFixed(
           2
-        )} as we replace everything once.`
+        )} (before shipping) as we replace everything once.`
       );
     }
     if (avgMonthRest > 0) {
       parts.push(
         `Months 2–12 then average around $${avgMonthRest.toFixed(
           2
-        )} per month as you move onto a refill schedule.`
+        )} per month in products and tax as you move onto a refill schedule.`
       );
     }
 
@@ -348,6 +396,7 @@ app.get("/plan", (req, res) => {
         subtotal: firstMonthSubtotal,
         tax_7_percent: firstMonthTax,
         total_with_tax: firstMonthTotal,
+        shipping_estimate: firstMonthShipping,
       },
       rest_of_year: restOfYear,
       schedule,
@@ -358,6 +407,7 @@ app.get("/plan", (req, res) => {
         kids_0_12: kids012,
         wontUse: wontUseList,
         wantToAdd,
+        store_shipments: storeShipments,
       },
     };
 
