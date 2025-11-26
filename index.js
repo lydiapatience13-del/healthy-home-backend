@@ -1,9 +1,9 @@
 import express from "express";
-import OpenAI from "openai";
+import fetch from "node-fetch";
 
 const app = express();
 
-// Simple CORS
+// Simple CORS for GET
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET");
@@ -11,46 +11,90 @@ app.use((req, res, next) => {
   next();
 });
 
-// NEW OpenAI client — works with project keys
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
 // GET /plan
 app.get("/plan", async (req, res) => {
   try {
-    const quiz = req.query;
+    const quiz = req.query || {};
 
     const prompt = `
 You are an onboarding assistant for Avodah Rogah’s Healthy Home Project.
-Output JSON only. The structure must be:
+
+Your job:
+- Look at the user's quiz data.
+- Create a simple, clear plan to detox their home using only natural, biologically recognizable, synthetic-free logic.
+- Output JSON ONLY in this structure:
+
 {
-  "summary": "...",
-  "priority_steps": [],
+  "summary": "short paragraph",
+  "priority_steps": [
+    "step 1",
+    "step 2"
+  ],
   "categories": [
     {
-      "name": "",
-      "reason": "",
-      "recommendations": []
+      "name": "Category name",
+      "reason": "Why this matters for THIS user",
+      "recommendations": [
+        {
+          "label": "Do this first",
+          "details": "Explain in 1–2 sentences"
+        }
+      ]
     }
   ]
 }
+
+Do NOT include any text outside the JSON object.
 
 User data:
 ${JSON.stringify(quiz)}
 `;
 
-    // NEW responses API (project-key compatible)
-    const response = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: prompt,
-      response_format: { type: "json_object" }
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      console.error("Missing OPENAI_API_KEY");
+      return res.status(500).json({ error: "Server misconfigured" });
+    }
+
+    const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You output JSON only." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.7
+      })
     });
 
-    const content = response.output[0].content[0].text;
+    if (!openaiResponse.ok) {
+      const errorText = await openaiResponse.text();
+      console.error("OpenAI HTTP error:", openaiResponse.status, errorText);
+      return res.status(500).json({ error: "OpenAI request failed" });
+    }
+
+    const data = await openaiResponse.json();
+    const rawContent = data.choices?.[0]?.message?.content || "{}";
+
+    let json;
+    try {
+      json = JSON.parse(rawContent);
+    } catch (e) {
+      console.error("Failed to parse JSON from OpenAI:", rawContent);
+      json = {
+        summary: rawContent,
+        priority_steps: [],
+        categories: []
+      };
+    }
 
     res.setHeader("Content-Type", "application/json");
-    res.send(content);
+    res.json(json);
   } catch (err) {
     console.error("Backend error:", err);
     res.status(500).json({ error: "Backend failure" });
