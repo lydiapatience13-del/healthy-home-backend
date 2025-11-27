@@ -243,7 +243,7 @@ app.get("/plan", (req, res) => {
       const initialQty = variantMultiplier;
       const initialCost = round2(initialQty * price);
 
-      // Remaining shipments: each shipment sends one unit per variant
+      // Remaining shipments (months 2–12): one unit per variant each shipment
       const refillsCost = round2(remainingShipments * price * variantMultiplier);
 
       const totalYearCost = round2(initialCost + refillsCost);
@@ -259,16 +259,15 @@ app.get("/plan", (req, res) => {
         url: p.url,
       });
 
-            const shipmentsPerYear = refillsPerYear; // includes initial month
       const shipmentIntervalMonths =
         shipmentsPerYear > 0 ? 12 / shipmentsPerYear : null;
 
       restYearProducts.push({
         name: p.name,
         unit_price: price,
-        shipments_per_year: shipmentsPerYear,        // how many shipments per year (incl. month 1)
-        shipment_interval_months: shipmentIntervalMonths, // 12 / shipments_per_year
-        shipments_remaining: remainingShipments,     // months 2–12 shipments
+        shipments_per_year: shipmentsPerYear,          // total shipments (incl. month 1)
+        shipment_interval_months: shipmentIntervalMonths,
+        shipments_remaining: remainingShipments,       // months 2–12 shipments
         refills_per_year: remainingShipments * variantMultiplier, // units in months 2–12
         cost_rest_of_year: refillsCost,
         total_cost_year: totalYearCost,
@@ -300,7 +299,7 @@ app.get("/plan", (req, res) => {
     const firstMonthTax = round2(firstMonthSubtotal * TAX_RATE);
     const firstMonthTotal = round2(firstMonthSubtotal + firstMonthTax);
 
-    // shipping for month 1 = one shipment per store that has any product
+    // Month 1 shipping = one shipment per store that has any product
     const storesCountMonth1 = Object.keys(storeShipments).length;
     const firstMonthShipping = round2(storesCountMonth1 * SHIPPING_PER_SHIPMENT);
     const restYearShipping = round2(shippingYearTotal - firstMonthShipping);
