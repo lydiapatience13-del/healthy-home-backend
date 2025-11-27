@@ -259,11 +259,17 @@ app.get("/plan", (req, res) => {
         url: p.url,
       });
 
+            const shipmentsPerYear = refillsPerYear; // includes initial month
+      const shipmentIntervalMonths =
+        shipmentsPerYear > 0 ? 12 / shipmentsPerYear : null;
+
       restYearProducts.push({
         name: p.name,
         unit_price: price,
-        shipments_remaining: remainingShipments,
-        refills_per_year: remainingShipments * variantMultiplier, // units
+        shipments_per_year: shipmentsPerYear,        // how many shipments per year (incl. month 1)
+        shipment_interval_months: shipmentIntervalMonths, // 12 / shipments_per_year
+        shipments_remaining: remainingShipments,     // months 2–12 shipments
+        refills_per_year: remainingShipments * variantMultiplier, // units in months 2–12
         cost_rest_of_year: refillsCost,
         total_cost_year: totalYearCost,
       });
